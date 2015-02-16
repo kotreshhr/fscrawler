@@ -25,7 +25,7 @@ struct xdirent {
 	struct list_head list;
 	ino_t            xd_ino;
 	struct stat      xd_stbuf;
-	char             xd_name[NAME_MAX+1];
+	char             xd_name[PATH_MAX];
 };
 
 int

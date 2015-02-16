@@ -264,6 +264,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 
 	plen = strlen (job->dirname) + 256 + 2;
 	path = alloca (plen);
+        boff = sprintf (path, "%s/", job->dirname);
 
 	tdbg ("Entering: %s\n", job->dirname);
 
@@ -303,7 +304,8 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
                                 buf_accnt.allocated = 1;
                         }
                         buf_accnt.entries[buf_accnt.count].xd_ino = result->d_ino;
-		        strncpy (buf_accnt.entries[buf_accnt.count].xd_name, result->d_name, NAME_MAX);
+                        strncpy (path + boff, result->d_name, (plen-boff));
+                        strcpy (buf_accnt.entries[buf_accnt.count].xd_name, path);
                         buf_accnt.count++;
                         if (buf_accnt.count == xwork->buf_len) {
                                 copy_ptr = buf_accnt.entries; 

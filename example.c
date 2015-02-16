@@ -23,9 +23,9 @@ call_back (struct xdirent *entries, int count)
 
         call_count++;
 
-        printf ("*******CALL COUNT: %d ***********\n", call_count);
+        /* printf ("*******CALL COUNT: %d ***********\n", call_count); */
         for (i=0; i<count; i++)
-                printf ("Inode num: %lu :: File basename :%s\n", entries[i].xd_ino, entries[i].xd_name);
+                printf ("%s\n", entries[i].xd_name);
         free (entries);
         return;
 }

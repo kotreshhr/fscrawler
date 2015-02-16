@@ -8,90 +8,7 @@
   cases as published by the Free Software Foundation.
 */
 
-#define _GNU_SOURCE
-
-#include <stdio.h>
-#include <errno.h>
-#include <sys/stat.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
-#include <attr/xattr.h>
-#include <assert.h>
-
-#include "list.h"
-
-#define THREAD_MAX 32
-
-#define err(x ...) fprintf(stderr, x)
-#define out(x ...) fprintf(stdout, x)
-#define dbg(x ...) do { if (DEBUG) fprintf(stdout, x); } while (0)
-#define tout(x ...) do { out("[%ld] ", pthread_self()); out(x); } while (0)
-#define terr(x ...) do { err("[%ld] ", pthread_self()); err(x); } while (0)
-#define tdbg(x ...) do { dbg("[%ld] ", pthread_self()); dbg(x); } while (0)
-
-
-#ifdef STATISTICS 
-#define INC(name, val) do {				\
-	if (!STATS)				        \
-		break;					\
-	pthread_spin_lock(&stats_lock);			\
-	{						\
-		stats_total.cnt_##name += val;		\
-	}						\
-	pthread_spin_unlock(&stats_lock);		\
-	} while (0)
-
-
-#define BUMP(name) INC(name, 1)
-#endif
-
-#define DEFAULT_WORKERS 4
-
-int DEBUG = 1;
-int WORKERS = 0;
-
-#define NEW(x) {                              \
-        x = calloc (1, sizeof (typeof (*x))); \
-        }
-
-struct dirjob {
-	struct list_head    list;
-
-	char               *dirname;
-
-	struct dirjob      *parent;
-	int                 ret;    /* final status of this subtree */
-	int                 refcnt; /* how many dirjobs have this as parent */
-
-	int                 filecnt;
-	int                 dircnt;
-
-	struct xdirent     *entries;
-	struct list_head    files;  /* xdirents of shortlisted files */
-	struct list_head    dirs;   /* xdirents of shortlisted dirs */
-
-	pthread_spinlock_t  lock;
-};
-
-
-struct xwork {
-	pthread_t        cthreads[THREAD_MAX]; /* crawler threads */
-	int              count;
-	int              idle;
-	int              stop;
-
-	struct dirjob    crawl;
-
-	struct dirjob   *rootjob; /* to verify completion in xwork_fini() */
-
-	pthread_mutex_t  mutex;
-	pthread_cond_t   cond;
-};
-
+#include "fscrawler.h"
 
 struct dirjob *
 dirjob_ref (struct dirjob *job)
@@ -270,6 +187,7 @@ skip_name (const char *dirname, const char *name)
 		}
 */
 
+/*
         if (strcmp (name, "changelogs") == 0)
                 return 1;
 
@@ -281,7 +199,7 @@ skip_name (const char *dirname, const char *name)
 
         if (strcmp (name, "landfill") == 0)
                 return 1;
-
+*/
 	return 0;
 }
 
@@ -296,15 +214,6 @@ skip_mode (struct stat *stat)
 		return 1;
 	return 0;
 }
-
-
-struct xdirent {
-	struct list_head list;
-	ino_t            xd_ino;
-	struct stat      xd_stbuf;
-	char             xd_name[NAME_MAX+1];
-};
-
 
 int
 skip_stat (struct dirjob *job, const char *name)
@@ -326,27 +235,6 @@ skip_stat (struct dirjob *job, const char *name)
                 }
         }
 
-        return 0;
-}
-
-struct buf_accounting {
-        pthread_spinlock_t alloc_lock;
-        struct xdirent *entries; 
-        int allocated;
-        int count;
-}buf_accnt;
-
-int call_back (struct xdirent *entries, int count)
-{
-        static int call_count = 0;
-        int i = 0;
-
-        call_count++;
-
-        printf ("*******HRKO CALL COUNT: %d ***********\n", call_count);
-        for (i=0; i<count; i++)
-                printf ("hrko_:%lu::%s\n", entries[i].xd_ino, entries[i].xd_name);
-        free (entries);
         return 0;
 }
 
@@ -373,7 +261,6 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	int             dircnt = 0;
  //       struct stat     statbuf = {0,};
 //	char            gfid_path[4096] = {0,};
-
 
 	plen = strlen (job->dirname) + 256 + 2;
 	path = alloca (plen);
@@ -408,7 +295,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
                 pthread_spin_lock(&buf_accnt.alloc_lock);
                 {
                         if (!buf_accnt.allocated) {
-                                buf_accnt.entries = calloc (5000, sizeof (*buf_accnt.entries));
+                                buf_accnt.entries = calloc (xwork->buf_len, sizeof (*buf_accnt.entries));
                                 if (buf_accnt.entries == NULL) {
                                         printf ("calloc failed: %s", strerror(errno)); 
                                         exit (1);
@@ -418,7 +305,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
                         buf_accnt.entries[buf_accnt.count].xd_ino = result->d_ino;
 		        strncpy (buf_accnt.entries[buf_accnt.count].xd_name, result->d_name, NAME_MAX);
                         buf_accnt.count++;
-                        if (buf_accnt.count == 5000) {
+                        if (buf_accnt.count == xwork->buf_len) {
                                 copy_ptr = buf_accnt.entries; 
                                 copy_count = buf_accnt.count;
                                 buf_accnt.allocated = 0;
@@ -442,7 +329,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	                qsort (copy_ptr, copy_count, sizeof (*copy_ptr), xd_cmp);
 
                         /* Call registered callback */
-                        call_back (copy_ptr, copy_count);
+                        xwork->callback (copy_ptr, copy_count);
                         copy_ptr = NULL;
                         copy_count = 0;
                 }
@@ -583,7 +470,7 @@ xwork_fini (struct xwork *xwork, int stop)
 		      xwork->cthreads[i], tret);
 	}
 
-        if (buf_accnt.count != 5000) {
+        if (buf_accnt.count != xwork->buf_len) {
                 int xd_cmp (const void *a, const void *b)
                 {
                         const struct xdirent *xda = a;
@@ -593,7 +480,7 @@ xwork_fini (struct xwork *xwork, int stop)
                 }
 
                 qsort (buf_accnt.entries, buf_accnt.count, sizeof (*buf_accnt.entries), xd_cmp);
-                call_back (buf_accnt.entries, buf_accnt.count);
+                xwork->callback (buf_accnt.entries, buf_accnt.count);
         }
 
 	if (DEBUG) {
@@ -606,7 +493,7 @@ xwork_fini (struct xwork *xwork, int stop)
 
 
 int
-xwork_init (struct xwork *xwork, int count)
+xwork_init (struct xwork *xwork, struct args *args)
 {
 	int  i = 0;
 	int  ret = 0;
@@ -623,8 +510,22 @@ xwork_init (struct xwork *xwork, int count)
 
 	xwork_addcrawl (xwork, rootjob);
 
-	xwork->count = count;
-	for (i = 0; i < count; i++) {
+        /* Initialize thread count. */
+        if (args->opt->thread_count <= 0)
+                xwork->count = DEFAULT_WORKERS;
+        else
+                xwork->count = args->opt->thread_count;
+
+        if (args->opt->buffer_len <= 0)
+                xwork->buf_len = DEFAULT_BUF_SIZE;
+        else
+                xwork->buf_len = args->opt->buffer_len;
+
+        /* Initialize callback function pointers */
+        xwork->filter = args->filter;
+        xwork->callback = args->callback;
+
+	for (i = 0; i < xwork->count; i++) {
 		ret = pthread_create (&xwork->cthreads[i], NULL,
 				      xworker_crawl, xwork);
 		if (ret)
@@ -638,7 +539,7 @@ xwork_init (struct xwork *xwork, int count)
 
 
 int
-xfind (const char *basedir)
+xfind (const char *basedir, struct args *args)
 {
 	struct xwork xwork;
 	int          ret = 0;
@@ -660,8 +561,7 @@ xfind (const char *basedir)
 	free (cwd);
 
 	memset (&xwork, 0, sizeof (xwork));
-
-	ret = xwork_init (&xwork, WORKERS);
+	ret = xwork_init (&xwork, args);
 	if (ret == 0)
 		xworker_crawl (&xwork);
 
@@ -672,55 +572,73 @@ xfind (const char *basedir)
 }
 
 static char *
-parse_and_validate_args (int argc, char *argv[])
+validate_brickpath (char *brickpath)
 {
-	char        *basedir = NULL;
 	struct stat  d = {0, };
 	int          ret = -1;
 	unsigned char volume_id[16];
 
-	if (argc != 3) {
-		err ("Usage: %s <DIR> <CRAWL-THREAD-COUNT>\n",
-                      argv[0]);
-		return NULL;
-	}
-
-	basedir = argv[1];
-	ret = lstat (basedir, &d);
+	ret = lstat (brickpath, &d);
 	if (ret) {
-		err ("%s: %s\n", basedir, strerror (errno));
-		return NULL;
+		err ("%s: %s\n", brickpath, strerror (errno));
+		brickpath = NULL;
+                goto out;
 	}
 
-	ret = lgetxattr (basedir, "trusted.glusterfs.volume-id",
+	ret = lgetxattr (brickpath, "trusted.glusterfs.volume-id",
 			 volume_id, 16);
 	if (ret != 16) {
-		err ("%s:Not a valid brick path.\n", basedir);
-		return NULL;
+		err ("%s:Not a valid brick path.\n", brickpath);
+		brickpath = NULL;
+                goto out;
 	}
 
-
-        WORKERS = atoi(argv[2]);
-        if (WORKERS <= 0)
-                WORKERS = DEFAULT_WORKERS;
-
-	return basedir;
+out:
+	return brickpath;
 }
 
 int
-main (int argc, char *argv[])
+fscrawl (char *brickpath, int (*filter) (struct stat *buf),
+         void (*callback) (struct xdirent *entries, int count), 
+         struct options *opt)
 {
+        int   ret     = 0;
 	char *basedir = NULL;
+        struct args args = {0,};
 
+        if (opt == NULL) {
+                err ("opt argument NULL");
+                goto out;
+        }
+                
         pthread_spin_init (&buf_accnt.alloc_lock, PTHREAD_PROCESS_PRIVATE);
 
-	basedir = parse_and_validate_args (argc, argv);
-	if (!basedir)
-		return 1;
+	basedir = validate_brickpath (brickpath);
+	if (!basedir) {
+                ret = -1;
+                goto err;
+        }
 
-	xfind (basedir);
+        /* Prepare args */
+        args.filter = filter;
+        args.callback = callback;
+        args.opt = opt;
+        
+	ret = xfind (basedir, &args);
 
+ err:
         pthread_spin_destroy (&buf_accnt.alloc_lock);
-
-	return 0;
+ out:
+	return ret;
 }
+
+/*
+int main (int argc, char *argv[])
+{
+        struct options opt = {0,};
+        
+        opt.thread_count = 2; 
+        opt.buffer_len = 200;
+        return fscrawl (argv[1], &filter, &call_back, &opt);
+}
+*/

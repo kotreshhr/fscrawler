@@ -72,8 +72,6 @@ struct dirjob {
 	int                 dircnt;
 
 	struct xdirent     *entries;
-	struct list_head    files;  /* xdirents of shortlisted files */
-	struct list_head    dirs;   /* xdirents of shortlisted dirs */
 
 	pthread_spinlock_t  lock;
 };

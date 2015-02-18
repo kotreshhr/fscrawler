@@ -8,9 +8,6 @@
   cases as published by the Free Software Foundation.
 */
 
-#define _BSD_SOURCE_
-#define _DEFAULT_SOURCE_
-
 #include "fscrawler.h"
 
 struct dirjob *
@@ -86,8 +83,6 @@ dirjob_new (const char *dir, struct dirjob *parent)
 	}
 
 	INIT_LIST_HEAD(&job->list);
-	INIT_LIST_HEAD(&job->files);
-	INIT_LIST_HEAD(&job->dirs);
 	pthread_spin_init (&job->lock, PTHREAD_PROCESS_PRIVATE);
 	job->ret = 0;
 
@@ -181,28 +176,7 @@ skip_name (const char *dirname, const char *name)
 
 	if (strcmp (name, ".glusterfs") == 0)
 		return 1;
-/* TODO:
-	if (strcmp (dirname, ".") == 0)
-		// skip even/odd entries from replicas
-		if ((dumbhash (name) % REPLICA) != (INDEX % REPLICA)) {
-			tdbg ("Skipping ./%s\n", name);
-			return 1;
-		}
-*/
 
-/*
-        if (strcmp (name, "changelogs") == 0)
-                return 1;
-
-        if (strcmp (name, "health_check") == 0)
-                return 1;
-
-        if (strcmp (name, "indices") == 0)
-                return 1;
-
-        if (strcmp (name, "landfill") == 0)
-                return 1;
-*/
 	return 0;
 }
 
@@ -257,7 +231,7 @@ inode_sort (struct xdirent *xdir, int count)
 }
 
 int
-fill_output_buffer (struct xwork *xwork, struct dirent *result,
+fill_output_buffer (struct xwork *xwork, struct xdirent *entry,
                     char *path, int plen, int boff)
 {
         struct xdirent *copy_ptr   = NULL;
@@ -276,8 +250,8 @@ fill_output_buffer (struct xwork *xwork, struct dirent *result,
                         }
                         buf_accnt.allocated = 1;
                 }
-                buf_accnt.entries[buf_accnt.count].xd_ino = result->d_ino;
-                strncpy (path + boff, result->d_name, (plen-boff));
+                buf_accnt.entries[buf_accnt.count].xd_ino = entry->xd_ino;
+                strncpy (path + boff, entry->xd_name, (plen-boff));
                 strcpy (buf_accnt.entries[buf_accnt.count].xd_name, path);
                 buf_accnt.count++;
                 if (buf_accnt.count == xwork->buf_len) {
@@ -321,10 +295,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	int             esize = 0;
 	int             i = 0;
 	struct dirjob  *cjob = NULL;
-//	int             filecnt = 0;
 	int             dircnt = 0;
- //       struct stat     statbuf = {0,};
-//	char            gfid_path[4096] = {0,};
 
 	plen = strlen (job->dirname) + 256 + 2;
 	path = alloca (plen);
@@ -357,11 +328,6 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		if (skip_name (job->dirname, result->d_name))
 			continue;
 
-                /* Call fill_output_buffer. */
-                ret = fill_output_buffer (xwork, result, path, plen, boff);
-                if (ret == -1)
-                        goto out;
-                
 		if (!esize) {
 			esize = 1024;
 			entries = calloc (esize, sizeof (*entries));
@@ -384,7 +350,6 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		entry = &entries[ecount];
 		entry->xd_ino = result->d_ino;
 		strncpy (entry->xd_name, result->d_name, NAME_MAX);
-		INIT_LIST_HEAD (&entry->list);
 		ecount++;
 	}
 
@@ -400,7 +365,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		if (ret) {
 			terr ("fstatat(%s): %s\n", path, strerror (errno));
 			closedir (dirp);
-			return -1;
+			goto out;
 		}
 
 		if (S_ISDIR (entry->xd_stbuf.st_mode)) {
@@ -411,45 +376,28 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 			continue;
 
 		if (S_ISDIR (entry->xd_stbuf.st_mode)) {
-			list_add_tail (&entry->list, &job->dirs);
-		//	BUMP(shortlist_dirs);
+		       strncpy (path + boff, entry->xd_name, (plen-boff));
+		        cjob = dirjob_new (path, job);
+		        if (!cjob) {
+			        err ("dirjob_new(%s): %s\n",
+			             path, strerror (errno));
+			        ret = -1;
+			        goto out;
+		        }
+		        xwork_addcrawl (xwork, cjob);
 		}
+
+                ret = fill_output_buffer (xwork, entry, path, plen, boff);
+                if (ret == -1)
+                        goto out;
 	}
 
 	job->dircnt = dircnt;
-
-	//INC(encountered_dirs, dircnt);
-	//INC(encountered_files, filecnt);
-
-	list_for_each_entry (entry, &job->dirs, list) {
-		strncpy (path + boff, entry->xd_name, (plen-boff));
-
-		cjob = dirjob_new (path, job);
-		if (!cjob) {
-			err ("dirjob_new(%s): %s\n",
-			     path, strerror (errno));
-			ret = -1;
-			goto out;
-		}
-
-		if (entry->xd_stbuf.st_nlink == 2) {
-			/* leaf node */
-			xwork_addcrawl (xwork, cjob);
-		///	BUMP(encountered_leafs);
-		} else {
-			ret = xworker_do_crawl (xwork, cjob);
-			dirjob_ret (cjob, ret);
-			if (ret)
-				goto out;
-		}
-	}
 
 	ret = 0;
 out:
 	if (dirp)
 		closedir (dirp);
-
-//	BUMP(scanned_dirs);
 
 	return ret;
 }

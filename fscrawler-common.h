@@ -14,7 +14,7 @@
 #include <dirent.h>
 #include "list.h"
 
-int DEBUG = 1;
+int DEBUG = 0;
 
 struct options {
         int thread_count;
@@ -24,7 +24,6 @@ struct options {
 };
 
 struct xdirent {
-	struct list_head list;
 	ino_t            xd_ino;
 	struct stat      xd_stbuf;
 	char             xd_name[PATH_MAX];

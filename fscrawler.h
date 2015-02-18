@@ -51,15 +51,13 @@
 #define DEFAULT_WORKERS 4
 #define DEFAULT_BUF_SIZE 5000
 
-int DEBUG = 0;
 int WORKERS = 0;
-
 
 #define NEW(x) {                              \
         x = calloc (1, sizeof (typeof (*x))); \
         }
 
-/*TODO: Conver variable types according to gluster code*/
+/*TODO: Convert variable types according to gluster code*/
 
 struct dirjob {
 	struct list_head    list;

@@ -8,6 +8,9 @@
   cases as published by the Free Software Foundation.
 */
 
+#define _BSD_SOURCE_
+#define _DEFAULT_SOURCE_
+
 #include "fscrawler.h"
 
 struct dirjob *
@@ -238,6 +241,69 @@ skip_stat (struct dirjob *job, const char *name)
         return 0;
 }
 
+void
+inode_sort (struct xdirent *xdir, int count)
+{
+        int xd_cmp (const void *a, const void *b)
+        {
+                const struct xdirent *xda = a;
+                const struct xdirent *xdb = b;
+
+                return (xda->xd_ino - xdb->xd_ino);
+        }
+
+        qsort (xdir, count, sizeof (*xdir), xd_cmp);
+        return;
+}
+
+int
+fill_output_buffer (struct xwork *xwork, struct dirent *result,
+                    char *path, int plen, int boff)
+{
+        struct xdirent *copy_ptr   = NULL;
+        int             copy_count = 0;
+        int             ret        = 0;
+
+        pthread_spin_lock(&buf_accnt.alloc_lock);
+        {
+                if (!buf_accnt.allocated) {
+                        buf_accnt.entries = calloc (xwork->buf_len, sizeof (*buf_accnt.entries));
+                        if (buf_accnt.entries == NULL) {
+                                printf ("calloc failed: %s", strerror(errno));
+                                pthread_spin_unlock (&buf_accnt.alloc_lock);
+                                ret = -1;
+                                goto out;
+                        }
+                        buf_accnt.allocated = 1;
+                }
+                buf_accnt.entries[buf_accnt.count].xd_ino = result->d_ino;
+                strncpy (path + boff, result->d_name, (plen-boff));
+                strcpy (buf_accnt.entries[buf_accnt.count].xd_name, path);
+                buf_accnt.count++;
+                if (buf_accnt.count == xwork->buf_len) {
+                        copy_ptr = buf_accnt.entries;
+                        copy_count = buf_accnt.count;
+                        buf_accnt.allocated = 0;
+                        buf_accnt.count = 0;
+                }
+        }
+        pthread_spin_unlock(&buf_accnt.alloc_lock);
+
+        /* Once copied the pointer to local variable, sort it according
+         * inode and call call_back routine. */
+
+        if (copy_ptr) {
+                /* Sort according to inode number. */
+                inode_sort (copy_ptr, copy_count);
+
+                /* Call registered callback */
+                xwork->callback (copy_ptr, copy_count);
+        }
+
+ out:
+        return ret;
+}
+
 int
 xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 {
@@ -248,8 +314,6 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 	struct dirent  *result;
 	char            dbuf[512];
 	char           *path = NULL;
-        struct xdirent *copy_ptr = NULL;
-        int             copy_count = NULL;
 	struct xdirent *entries = NULL;
 	struct xdirent *entry = NULL;
 	struct xdirent *rentries = NULL;
@@ -293,48 +357,10 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		if (skip_name (job->dirname, result->d_name))
 			continue;
 
-                pthread_spin_lock(&buf_accnt.alloc_lock);
-                {
-                        if (!buf_accnt.allocated) {
-                                buf_accnt.entries = calloc (xwork->buf_len, sizeof (*buf_accnt.entries));
-                                if (buf_accnt.entries == NULL) {
-                                        printf ("calloc failed: %s", strerror(errno)); 
-                                        exit (1);
-                                }
-                                buf_accnt.allocated = 1;
-                        }
-                        buf_accnt.entries[buf_accnt.count].xd_ino = result->d_ino;
-                        strncpy (path + boff, result->d_name, (plen-boff));
-                        strcpy (buf_accnt.entries[buf_accnt.count].xd_name, path);
-                        buf_accnt.count++;
-                        if (buf_accnt.count == xwork->buf_len) {
-                                copy_ptr = buf_accnt.entries; 
-                                copy_count = buf_accnt.count;
-                                buf_accnt.allocated = 0;
-                                buf_accnt.count = 0;
-                        }
-                }
-                pthread_spin_unlock(&buf_accnt.alloc_lock);
-
-                /* Once copied the pointer to local variable, sort it according
-                 * inode and call call_back routine. */
-          
-                if (copy_ptr) {
-        	        int xd_cmp (const void *a, const void *b)
-	                {
-		                const struct xdirent *xda = a;
-		                const struct xdirent *xdb = b;
-
-		                return (xda->xd_ino - xdb->xd_ino);
-	                }
-
-	                qsort (copy_ptr, copy_count, sizeof (*copy_ptr), xd_cmp);
-
-                        /* Call registered callback */
-                        xwork->callback (copy_ptr, copy_count);
-                        copy_ptr = NULL;
-                        copy_count = 0;
-                }
+                /* Call fill_output_buffer. */
+                ret = fill_output_buffer (xwork, result, path, plen, boff);
+                if (ret == -1)
+                        goto out;
                 
 		if (!esize) {
 			esize = 1024;
@@ -362,15 +388,7 @@ xworker_do_crawl (struct xwork *xwork, struct dirjob *job)
 		ecount++;
 	}
 
-	int xd_cmp (const void *a, const void *b)
-	{
-		const struct xdirent *xda = a;
-		const struct xdirent *xdb = b;
-
-		return (xda->xd_ino - xdb->xd_ino);
-	}
-
-	qsort (entries, ecount, sizeof (*entries), xd_cmp);
+        inode_sort (entries, ecount);
 
 	boff = sprintf (path, "%s/", job->dirname);
 
@@ -473,15 +491,8 @@ xwork_fini (struct xwork *xwork, int stop)
 	}
 
         if (buf_accnt.count != xwork->buf_len) {
-                int xd_cmp (const void *a, const void *b)
-                {
-                        const struct xdirent *xda = a;
-                        const struct xdirent *xdb = b;
 
-                        return (xda->xd_ino - xdb->xd_ino);
-                }
-
-                qsort (buf_accnt.entries, buf_accnt.count, sizeof (*buf_accnt.entries), xd_cmp);
+                inode_sort (buf_accnt.entries, buf_accnt.count);
                 xwork->callback (buf_accnt.entries, buf_accnt.count);
         }
 

@@ -14,6 +14,8 @@
 #include <dirent.h>
 #include "list.h"
 
+int DEBUG = 1;
+
 struct options {
         int thread_count;
         int buffer_len;
